@@ -3,21 +3,24 @@
 buildscript {
     repositories {
         google()
-        jcenter()
+        mavenCentral()
     }
     dependencies {
         classpath 'com.android.tools.build:gradle:3.5.3'
-        classpath 'com.novoda:bintray-release:0.9.1'
         // NOTE: Do not place your application dependencies here; they belong
         // in the individual module build.gradle files
     }
 }
 
+plugins {
+    id 'maven-publish'
+}
+
 allprojects {
     repositories {
         google()
-        jcenter()
         mavenCentral()
+        maven { url "https://google.github.io/webrtc-android/maven" }
     }
 
     gradle.projectsEvaluated {
@@ -26,6 +29,56 @@ allprojects {
         }
     }
 
+}
+
+afterEvaluate {
+    publishing {
+        publications {
+            jitpack(MavenPublication) {
+                groupId = project.findProperty('group') ?: 'com.github.0xli'
+                artifactId = project.findProperty('artifact') ?: 'Elastos.NET.WebRTC.Android.SDK'
+                version = project.findProperty('version') ?: '1.0.0'
+                artifact("$rootDir/webrtc/build/outputs/aar/org.elastos.carrier.webrtc-release.aar") {
+                    builtBy ':webrtc:assembleRelease'
+                    extension 'aar'
+                }
+                pom {
+                    name = 'Elastos WebRTC Android SDK'
+                    description = 'Elastos Carrier WebRTC SDK'
+                    url = 'https://github.com/0xli/Elastos.NET.WebRTC.Android.SDK'
+                    packaging = 'aar'
+                    licenses {
+                        license {
+                            name = 'MIT License'
+                            url = 'https://opensource.org/licenses/MIT'
+                        }
+                    }
+                    withXml {
+                        def dependenciesNode = asNode().appendNode('dependencies')
+                        [
+                                ['org.elastos', 'carrier', '6.0.2'],
+                                ['org.webrtc', 'google-webrtc', '1.0.30039'],
+                                ['org.awaitility', 'awaitility', '3.0.0'],
+                                ['com.google.guava', 'guava', '28.1-android'],
+                                ['org.apache.commons', 'commons-lang3', '3.9'],
+                                ['com.google.code.gson', 'gson', '2.8.6'],
+                                ['org.slf4j', 'slf4j-api', '1.7.29'],
+                                ['com.github.tony19', 'logback-android', '2.0.0'],
+                                ['commons-codec', 'commons-codec', '1.10'],
+                                ['org.osgi', 'org.osgi.framework', '1.9.0'],
+                                ['androidx.annotation', 'annotation', '1.0.0']
+                        ].each { dep ->
+                            def dependencyNode = dependenciesNode.appendNode('dependency')
+                            dependencyNode.appendNode('groupId', dep[0])
+                            dependencyNode.appendNode('artifactId', dep[1])
+                            dependencyNode.appendNode('version', dep[2])
+                            dependencyNode.appendNode('scope', 'compile')
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 task clean(type: Delete) {

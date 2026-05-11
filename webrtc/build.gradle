@@ -1,7 +1,6 @@
 import java.util.function.BooleanSupplier
 
 apply plugin: 'com.android.library'
-apply plugin: 'com.novoda.bintray-release'
 apply plugin: 'maven'
 
 android {
@@ -91,14 +90,4 @@ uploadArchives {
         pom.artifactId = "webrtc"
         pom.version = "1.0.0"
     }
-}
-
-publish {
-    userOrg = 'elastos'
-    groupId = 'org.elastos.carrier'
-    artifactId = 'webrtc'
-    publishVersion = '1.0.0'
-    desc = 'Elastos Carrier WebRTC SDK'
-    repoName = 'Elastos.NET.WebRTC.Android.SDK'
-    website = 'https://github.com/elastos/Elastos.NET.WebRTC.Android.SDK'
 }
