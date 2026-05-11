@@ -41,7 +41,7 @@ afterEvaluate {
                 artifactId = project.findProperty('artifact') ?: 'Elastos.NET.WebRTC.Android.SDK'
                 version = project.findProperty('version') ?: '1.0.0'
                 artifact("$rootDir/webrtc/build/outputs/aar/org.elastos.carrier.webrtc-release.aar") {
-                    builtBy ':webrtc:assembleRelease'
+                    builtBy tasks.getByPath(':webrtc:assembleRelease')
                     extension 'aar'
                 }
                 pom {
