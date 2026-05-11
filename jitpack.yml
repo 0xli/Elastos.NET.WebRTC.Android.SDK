@@ -1,2 +1,4 @@
 jdk:
   - openjdk8
+install:
+  - ./gradlew -Pgroup=com.github.0xli -Pversion=$VERSION :webrtc:assembleRelease publishToMavenLocal
