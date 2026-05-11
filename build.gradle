@@ -21,7 +21,6 @@ allprojects {
         google()
         mavenCentral()
         maven { url "https://google.github.io/webrtc-android/maven" }
-        maven { url = uri("$rootDir/local-maven") }
         maven { url = uri("https://raw.githubusercontent.com/alexgreench/google-webrtc/master") }
     }
 
@@ -58,7 +57,6 @@ afterEvaluate {
                     withXml {
                         def dependenciesNode = asNode().appendNode('dependencies')
                         [
-                                ['org.elastos', 'carrier', '6.0.4'],
                                 ['org.webrtc', 'google-webrtc', '1.0.30039'],
                                 ['org.awaitility', 'awaitility', '3.0.0'],
                                 ['com.google.guava', 'guava', '28.1-android'],
