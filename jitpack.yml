@@ -1,4 +1,4 @@
 jdk:
-  - openjdk8
+  - openjdk17
 install:
-  - ./gradlew -Pgroup=com.github.0xli -Pversion=$VERSION :webrtc:assembleRelease publishToMavenLocal
+  - ./gradlew --no-daemon -Pgroup=com.github.0xli -Pversion=$VERSION :webrtc:assembleRelease publishToMavenLocal

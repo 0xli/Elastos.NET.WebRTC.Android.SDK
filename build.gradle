@@ -1,4 +1,4 @@
-// Top-level build file where you can add configuration options common to all sub-projects/modules.
+// Top-level build file where you can configure options common to all sub-projects/modules.
 
 buildscript {
     repositories {
@@ -6,9 +6,7 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:3.5.3'
-        // NOTE: Do not place your application dependencies here; they belong
-        // in the individual module build.gradle files
+        classpath 'com.android.tools.build:gradle:8.5.1'
     }
 }
 
@@ -25,11 +23,10 @@ allprojects {
     }
 
     gradle.projectsEvaluated {
-        tasks.withType(JavaCompile) {
+        tasks.withType(JavaCompile).configureEach {
             options.compilerArgs << "-Xlint:unchecked" << "-Xlint:deprecation"
         }
     }
-
 }
 
 afterEvaluate {
@@ -38,10 +35,10 @@ afterEvaluate {
             jitpack(MavenPublication) {
                 groupId = project.findProperty('group') ?: 'com.github.0xli'
                 artifactId = project.findProperty('artifact') ?: 'Elastos.NET.WebRTC.Android.SDK'
-                version = project.findProperty('version') ?: '1.0.0'
-                artifact("$rootDir/webrtc/build/outputs/aar/org.elastos.carrier.webrtc-release.aar") {
+                version = project.findProperty('version') ?: '0.0.3-SNAPSHOT'
+                def aar = file("${rootDir}/webrtc/build/outputs/aar/webrtc-release.aar")
+                artifact(aar) {
                     builtBy tasks.getByPath(':webrtc:assembleRelease')
-                    extension 'aar'
                 }
                 pom {
                     name = 'Elastos WebRTC Android SDK'
@@ -81,6 +78,6 @@ afterEvaluate {
     }
 }
 
-task clean(type: Delete) {
-    delete rootProject.buildDir
+tasks.register('clean', Delete) {
+    delete rootProject.layout.buildDirectory
 }

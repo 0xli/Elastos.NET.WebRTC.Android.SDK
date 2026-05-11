@@ -1,1 +1,4 @@
-include ':webrtc', ':demo-apprtc', ':chatkit'
+// JitPack and modern AGP builds only compile the published library module.
+// Demo and legacy chatkit use old support libraries; restore them in a separate
+// branch if you need the full tree: include ':webrtc', ':demo-apprtc', ':chatkit'
+include ':webrtc'

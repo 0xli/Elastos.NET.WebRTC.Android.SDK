@@ -712,12 +712,19 @@ public class CarrierPeerConnectionClient {
         init.maxRetransmitTimeMs = peerConnectionParameters.dataChannelParameters.maxRetransmitTimeMs;
         init.id = peerConnectionParameters.dataChannelParameters.id;
         init.protocol = peerConnectionParameters.dataChannelParameters.protocol;
-        dataChannel = peerConnection.createDataChannel("Carrier webrtc data", init);
-        dataChannel.registerObserver(new DataChannel.Observer() {
+        final DataChannel createdChannel = peerConnection.createDataChannel("Carrier webrtc data", init);
+        if (createdChannel == null) {
+            Log.e(TAG, "createDataChannel: peerConnection.createDataChannel returned null");
+            return;
+        }
+        dataChannel = createdChannel;
+        // Capture a final reference: the outer field `dataChannel` can be cleared on disconnect while
+        // callbacks still run; using it inside the observer caused NPE on label().
+        createdChannel.registerObserver(new DataChannel.Observer() {
             @Override
             public void onBufferedAmountChange(long previousAmount) {
                 try {
-                    Log.d(TAG, "Data channel buffered amount changed(created): " + dataChannel.label() + ": " + dataChannel.state());
+                    Log.d(TAG, "Data channel buffered amount changed(created): " + createdChannel.label() + ": " + createdChannel.state());
                 } catch (Exception e) {
                     Log.e(TAG, "onBufferedAmountChange(created): ", e);
                 }
@@ -726,7 +733,7 @@ public class CarrierPeerConnectionClient {
             @Override
             public void onStateChange() {
                 try {
-                    Log.d(TAG, "Data channel state changed(created): " + dataChannel.label() + ": " + dataChannel.state());
+                    Log.d(TAG, "Data channel state changed(created): " + createdChannel.label() + ": " + createdChannel.state());
                 } catch (Exception e) {
                     Log.e(TAG, "onStateChange(created): ", e);
                 }

@@ -1,16 +1,16 @@
-import java.util.function.BooleanSupplier
-
-apply plugin: 'com.android.library'
-apply plugin: 'maven'
+plugins {
+    id 'com.android.library'
+}
 
 android {
-    compileSdkVersion 28
-    buildToolsVersion = '28.0.3'
+    namespace 'org.elastos.carrier.webrtc'
+    compileSdk 34
+
     defaultConfig {
-        minSdkVersion 21
-        targetSdkVersion 28
+        minSdk 21
+        targetSdk 34
         versionCode 1
-        versionName "1.0.0"
+        versionName "0.0.3"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         multiDexEnabled true
     }
@@ -18,30 +18,19 @@ android {
     buildTypes {
         release {
             minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
         debug {
-            testCoverageEnabled = true
+            testCoverageEnabled = false
         }
     }
 
-    android.libraryVariants.all { variant ->
-        variant.outputs.all {
-            def manifestParser = new com.android.builder.core.DefaultManifestParser(
-                    android.sourceSets.main.manifest.srcFile, new BooleanSupplier() {
-                @Override
-                boolean getAsBoolean() {
-                    return true
-                }
-            }, null)
-            outputFileName = manifestParser.getPackage() + "-${buildType.name}.aar"
-        }
-    }
     compileOptions {
-        sourceCompatibility = '1.8'
-        targetCompatibility = '1.8'
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
     }
-    lintOptions {
+
+    lint {
         abortOnError false
     }
 
@@ -56,8 +45,6 @@ dependencies {
     api fileTree(dir: 'libs', include: ['*.jar'])
 
     implementation 'org.webrtc:google-webrtc:1.0.30039'
-
-
     implementation 'org.awaitility:awaitility:3.0.0'
     implementation 'com.google.guava:guava:28.1-android'
     implementation 'org.apache.commons:commons-lang3:3.9'
@@ -65,29 +52,16 @@ dependencies {
     implementation 'org.slf4j:slf4j-api:1.7.29'
     implementation 'com.github.tony19:logback-android:2.0.0'
     implementation 'commons-codec:commons-codec:1.10'
-
     implementation 'org.osgi:org.osgi.framework:1.9.0'
     implementation 'androidx.annotation:annotation:1.0.0'
 
-    compileOnly files('../local-libs/carrier-6.0.4.aar')
+    // Provided by the host app (BeagleChat); keeps Carrier out of the published AAR.
+    compileOnly 'org.elastos:carrier:6.0.4'
 
     testImplementation 'junit:junit:4.12'
     testImplementation 'org.assertj:assertj-core:3.11.1'
     testImplementation 'org.mockito:mockito-core:1.9.5'
-
     testImplementation 'androidx.test:core:1.2.0'
-
     androidTestImplementation 'androidx.test.ext:junit:1.1.1'
     androidTestImplementation 'androidx.test.espresso:espresso-core:3.2.0'
-
-}
-
-uploadArchives {
-    repositories.mavenDeployer {
-        // local file system
-        repository(url:"file://$buildDir//outputs//maven")
-        pom.groupId = "org.elastos.carrier"
-        pom.artifactId = "webrtc"
-        pom.version = "1.0.0"
-    }
 }
