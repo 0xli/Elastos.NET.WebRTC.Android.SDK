@@ -25,7 +25,6 @@ package org.elastos.carrier.webrtc;
 import android.content.Context;
 import android.os.Handler;
 import android.os.HandlerThread;
-import android.telecom.Call;
 import android.text.TextUtils;
 import android.util.Log;
 
@@ -90,6 +89,7 @@ public class WebrtcClient extends CarrierExtension {
     private Context context;
     private EglBase eglBase;
     private CarrierPeerConnectionClient carrierPeerConnectionClient;
+    private final CarrierPeerConnectionClient.PeerConnectionParameters defaultPeerConnectionParameters;
     private CarrierPeerConnectionClient.PeerConnectionParameters peerConnectionParameters;
     private SignalingParameters signalingParameters;
     private ProxyVideoSink localProxyVideoSink = new ProxyVideoSink();
@@ -100,6 +100,10 @@ public class WebrtcClient extends CarrierExtension {
     private SessionDescription remoteSdp;
     private boolean callInitialed = false;
     private List<IceCandidate> remoteIceList;
+    private boolean offerAudioEnabled = true;
+    private boolean pendingOfferAudioEnabled = true;
+    private boolean pendingOfferVideoEnabled = true;
+    private boolean pendingOfferDataEnabled = false;
 
     private WebrtcClient(Context context,
                          Carrier carrier,
@@ -118,11 +122,10 @@ public class WebrtcClient extends CarrierExtension {
         this.callHandler = callHandler;
         this.friendInviteResponseHandler = new CarrierMessageObserver();
         this.callState = CallState.INIT;
-        if (peerConnectionParameters != null) {
-            this.peerConnectionParameters = peerConnectionParameters;
-        } else {
-            this.peerConnectionParameters = PeerConnectionParametersBuilder.builder().build();
-        }
+        this.defaultPeerConnectionParameters = peerConnectionParameters != null
+                ? peerConnectionParameters
+                : PeerConnectionParametersBuilder.builder().build();
+        this.peerConnectionParameters = this.defaultPeerConnectionParameters;
         final HandlerThread handlerThread = new HandlerThread(TAG);
         handlerThread.start();
         this.handler = new Handler(handlerThread.getLooper());
@@ -164,6 +167,30 @@ public class WebrtcClient extends CarrierExtension {
      * @param peerAddress The remote peer to which the call is going to make with.
      */
     public void makeCall(String peerAddress) throws WebrtcException {
+        makeCall(peerAddress, defaultPeerConnectionParameters.videoCallEnabled);
+    }
+
+    /**
+     * Make call to remote peer with explicit video intent.
+     *
+     * @param peerAddress The remote peer to call.
+     * @param videoEnabled true for video call, false for audio-only call.
+     */
+    public void makeCall(String peerAddress, boolean videoEnabled) throws WebrtcException {
+        makeCall(peerAddress, true, videoEnabled,
+                defaultPeerConnectionParameters.dataChannelParameters != null);
+    }
+
+    /**
+     * Make call to remote peer with explicit media intent.
+     *
+     * @param peerAddress The remote peer to call.
+     * @param audioEnabled true to advertise audio.
+     * @param videoEnabled true to capture/send/receive video.
+     * @param dataEnabled true to enable the data channel.
+     */
+    public void makeCall(String peerAddress, boolean audioEnabled, boolean videoEnabled, boolean dataEnabled)
+            throws WebrtcException {
         if (peerAddress == null) {
             throw new IllegalArgumentException("Invalid remote address");
         }
@@ -173,6 +200,9 @@ public class WebrtcClient extends CarrierExtension {
 
         this.initiator = true;
         this.remoteUserId = peerAddress;
+        this.offerAudioEnabled = audioEnabled;
+        this.peerConnectionParameters = copyPeerConnectionParameters(
+                defaultPeerConnectionParameters, videoEnabled, dataEnabled);
 
         // make call, just send offer to remote peer
         this.setCallState(CallState.CONNECTING);
@@ -187,6 +217,8 @@ public class WebrtcClient extends CarrierExtension {
     public void answerCall() {
         this.initiator = false;
         this.setCallState(CallState.CONNECTING);
+        this.peerConnectionParameters = copyPeerConnectionParameters(
+                defaultPeerConnectionParameters, pendingOfferVideoEnabled, pendingOfferDataEnabled);
 
         initialCall();
         // set remote sdp
@@ -381,6 +413,7 @@ public class WebrtcClient extends CarrierExtension {
         this.setCallState(CallState.INIT);
         connectionState = ConnectionState.CLOSED;
         release();
+        peerConnectionParameters = defaultPeerConnectionParameters;
     }
 
     private void release() {
@@ -423,7 +456,7 @@ public class WebrtcClient extends CarrierExtension {
             return;
         }
 
-        sendOffer(sdp, true, peerConnectionParameters.videoCallEnabled, peerConnectionParameters.dataChannelParameters != null);
+        sendOffer(sdp, offerAudioEnabled, peerConnectionParameters.videoCallEnabled, peerConnectionParameters.dataChannelParameters != null);
         Log.d(TAG, "sendOfferSdp() from " + currentUserId + ", to: " + remoteUserId);
     }
 
@@ -506,6 +539,9 @@ public class WebrtcClient extends CarrierExtension {
                 }
             }
         }
+        pendingOfferAudioEnabled = audio;
+        pendingOfferVideoEnabled = video;
+        pendingOfferDataEnabled = data;
         this.setCallState(CallState.RINGING);
         signalingParameters = new SignalingParameters(getIceServers(), false, remoteUserId, null, null);
         // emit user callback
@@ -706,6 +742,40 @@ public class WebrtcClient extends CarrierExtension {
             }
         }
         return null;
+    }
+
+    private CarrierPeerConnectionClient.PeerConnectionParameters copyPeerConnectionParameters(
+            CarrierPeerConnectionClient.PeerConnectionParameters source,
+            boolean videoEnabled,
+            boolean dataEnabled) {
+        CarrierPeerConnectionClient.DataChannelParameters dataChannelParameters =
+                dataEnabled ? source.dataChannelParameters : null;
+        if (dataEnabled && dataChannelParameters == null) {
+            dataChannelParameters = new CarrierPeerConnectionClient.DataChannelParameters(
+                    true, -1, -1, "", false, 3);
+        }
+        return new CarrierPeerConnectionClient.PeerConnectionParameters(
+                videoEnabled,
+                source.tracing,
+                source.videoWidth,
+                source.videoHeight,
+                source.videoFps,
+                source.videoMaxBitrate,
+                source.videoCodec,
+                source.videoCodecHwAcceleration,
+                source.videoFlexfecEnabled,
+                source.audioStartBitrate,
+                source.audioCodec,
+                source.noAudioProcessing,
+                source.aecDump,
+                source.saveInputAudioToFile,
+                source.useOpenSLES,
+                source.disableBuiltInAEC,
+                source.disableBuiltInAGC,
+                source.disableBuiltInNS,
+                source.disableWebRtcAGCAndHPF,
+                source.enableRtcEventLog,
+                dataChannelParameters);
     }
 
     // --------------------------------------------------------------------
