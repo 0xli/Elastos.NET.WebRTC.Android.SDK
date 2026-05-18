@@ -723,8 +723,12 @@ public class CarrierPeerConnectionClient {
         createdChannel.registerObserver(new DataChannel.Observer() {
             @Override
             public void onBufferedAmountChange(long previousAmount) {
+                // Skip if the channel has already been disposed in closeInternal().
+                if (dataChannel == null) return;
                 try {
                     Log.d(TAG, "Data channel buffered amount changed(created): " + createdChannel.label() + ": " + createdChannel.state());
+                } catch (IllegalStateException e) {
+                    Log.w(TAG, "onBufferedAmountChange(created): channel already disposed");
                 } catch (Exception e) {
                     Log.e(TAG, "onBufferedAmountChange(created): ", e);
                 }
@@ -732,8 +736,12 @@ public class CarrierPeerConnectionClient {
 
             @Override
             public void onStateChange() {
+                // Skip if the channel has already been disposed in closeInternal().
+                if (dataChannel == null) return;
                 try {
                     Log.d(TAG, "Data channel state changed(created): " + createdChannel.label() + ": " + createdChannel.state());
+                } catch (IllegalStateException e) {
+                    Log.w(TAG, "onStateChange(created): channel already disposed");
                 } catch (Exception e) {
                     Log.e(TAG, "onStateChange(created): ", e);
                 }
@@ -741,6 +749,7 @@ public class CarrierPeerConnectionClient {
 
             @Override
             public void onMessage(final DataChannel.Buffer buffer) {
+                if (dataChannel == null) return;
                 if (callHandler != null) {
                     callHandler.onMessage(buffer.data, buffer.binary);
                 }
@@ -821,10 +830,10 @@ public class CarrierPeerConnectionClient {
         if (rootEglBase != null) {
             try {
                 rootEglBase.release();
-                rootEglBase = null;
             } catch (Exception e) {
                 Log.e(TAG, "closeInternal: release eglBase error", e);
             }
+            rootEglBase = null;
         }
         Log.d(TAG, "Closing peer connection done.");
         events.onPeerConnectionClosed();

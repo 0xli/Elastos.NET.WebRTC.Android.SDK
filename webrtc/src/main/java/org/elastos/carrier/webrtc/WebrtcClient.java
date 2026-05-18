@@ -60,7 +60,9 @@ import org.webrtc.VideoSink;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Initial the Carrier Webrtc Client instance for webrtc call using carrier network.
@@ -77,6 +79,12 @@ public class WebrtcClient extends CarrierExtension {
     private static final String TAG = "WebrtcClient";
 
     private static WebrtcClient INSTANCE;
+
+    /**
+     * Extra STUN/TURN entries merged after Carrier {@link #getTurnServerInfo()} (e.g. from app config).
+     * Thread-safe; safe to call before {@link #createInstance(Context, Carrier, CallHandler, PeerConnectionParameters)}.
+     */
+    private static volatile List<PeerConnection.IceServer> supplementalIceServers = Collections.emptyList();
     private final Handler handler;
     private boolean initiator;
     private ConnectionState connectionState;
@@ -104,6 +112,11 @@ public class WebrtcClient extends CarrierExtension {
     private boolean pendingOfferAudioEnabled = true;
     private boolean pendingOfferVideoEnabled = true;
     private boolean pendingOfferDataEnabled = false;
+    // Per-call signalling identifier. For outgoing calls we generate a UUID at makeCall();
+    // for incoming calls we capture it from the remote offer in handleOffer(). It is then
+    // echoed on every signalling message (offer/answer/candidate/bye) so peers — notably
+    // the iOS CallKit-based client — can match each message to the correct call session.
+    private String currentCallId;
 
     private WebrtcClient(Context context,
                          Carrier carrier,
@@ -150,6 +163,21 @@ public class WebrtcClient extends CarrierExtension {
 
     public static WebrtcClient getInstance() {
         return INSTANCE;
+    }
+
+    /**
+     * Sets ICE servers merged after those from the Carrier network on each call to {@link #getIceServers()}.
+     *
+     * @param servers may be null or empty to clear; entries are copied and held until replaced.
+     */
+    public static void setSupplementalIceServers(@Nullable List<PeerConnection.IceServer> servers) {
+        synchronized (WebrtcClient.class) {
+            if (servers == null || servers.isEmpty()) {
+                supplementalIceServers = Collections.emptyList();
+            } else {
+                supplementalIceServers = Collections.unmodifiableList(new ArrayList<>(servers));
+            }
+        }
     }
 
     /**
@@ -203,6 +231,9 @@ public class WebrtcClient extends CarrierExtension {
         this.offerAudioEnabled = audioEnabled;
         this.peerConnectionParameters = copyPeerConnectionParameters(
                 defaultPeerConnectionParameters, videoEnabled, dataEnabled);
+        // Fresh UUID identifies this call on the wire. Uppercase + hyphens matches the
+        // format the iOS CallKit-based client uses for its own callIds.
+        this.currentCallId = UUID.randomUUID().toString().toUpperCase();
 
         // make call, just send offer to remote peer
         this.setCallState(CallState.CONNECTING);
@@ -266,8 +297,16 @@ public class WebrtcClient extends CarrierExtension {
         if (this.eglBase == null) {
             this.eglBase = EglBase.create();
         }
-        this.localVideoRenderer.init(eglBase.getEglBaseContext(), null);
-        this.remoteVideoRenderer.init(eglBase.getEglBaseContext(), null);
+        try {
+            this.localVideoRenderer.init(eglBase.getEglBaseContext(), null);
+        } catch (IllegalStateException e) {
+            Log.w(TAG, "renderVideo: local renderer already initialized, skipping init", e);
+        }
+        try {
+            this.remoteVideoRenderer.init(eglBase.getEglBaseContext(), null);
+        } catch (IllegalStateException e) {
+            Log.w(TAG, "renderVideo: remote renderer already initialized, skipping init", e);
+        }
         swapVideoRenderer(false);
     }
 
@@ -400,6 +439,10 @@ public class WebrtcClient extends CarrierExtension {
             iceServers.add(PeerConnection.IceServer.builder("stun:" + turnServerInfo.getServer() + ":" + turnServerInfo.getPort()).setUsername(turnServerInfo.getUsername()).setPassword(turnServerInfo.getPassword()).createIceServer());
             iceServers.add(PeerConnection.IceServer.builder("turn:" + turnServerInfo.getServer() + ":" + turnServerInfo.getPort()).setUsername(turnServerInfo.getUsername()).setPassword(turnServerInfo.getPassword()).createIceServer());
         }
+        List<PeerConnection.IceServer> extra = supplementalIceServers;
+        if (extra != null && !extra.isEmpty()) {
+            iceServers.addAll(extra);
+        }
         return iceServers;
     }
 
@@ -414,6 +457,7 @@ public class WebrtcClient extends CarrierExtension {
         connectionState = ConnectionState.CLOSED;
         release();
         peerConnectionParameters = defaultPeerConnectionParameters;
+        currentCallId = null;
     }
 
     private void release() {
@@ -521,6 +565,11 @@ public class WebrtcClient extends CarrierExtension {
         );
         // save remote sdp
         remoteSdp = sdp;
+        // Capture the caller's callId so subsequent answer/candidate/bye messages echo it.
+        // Peers that key signalling by callId (e.g. iOS CallKit) require this to match
+        // replies to the originating call session.
+        String offerCallId = json.optString(MessageKey.callId.name(), "");
+        this.currentCallId = TextUtils.isEmpty(offerCallId) ? null : offerCallId;
         JSONArray options = json.optJSONArray(MessageKey.options.name());
         boolean audio = false;
         boolean video = false;
@@ -837,20 +886,11 @@ public class WebrtcClient extends CarrierExtension {
         JSONObject json = new JSONObject();
         // offer type
         jsonPut(json, MessageKey.type.name(), MessageType.OFFER.getValue());
+        putCallIdIfPresent(json);
         // offer sdp
         jsonPut(json, MessageKey.sdp.name(), sdp.description);
         // offer options
-        JSONArray options = new JSONArray();
-        if (audio) {
-            options.put("audio");
-        }
-        if (video) {
-            options.put("video");
-        }
-        if (data) {
-            options.put("data");
-        }
-        jsonPut(json, MessageKey.options.name(), options);
+        jsonPut(json, MessageKey.options.name(), buildOptions(audio, video, data));
 
         // send json message
         send(json.toString());
@@ -868,8 +908,13 @@ public class WebrtcClient extends CarrierExtension {
         JSONObject json = new JSONObject();
         // answer type
         jsonPut(json, MessageKey.type.name(), MessageType.ANSWER.getValue());
+        putCallIdIfPresent(json);
         // answer sdp
         jsonPut(json, MessageKey.sdp.name(), sdp.description);
+        // Mirror the modalities the caller advertised. The iOS client gates its audio/video
+        // pipeline on this array, so an answer without it can be silently dropped.
+        jsonPut(json, MessageKey.options.name(),
+                buildOptions(pendingOfferAudioEnabled, pendingOfferVideoEnabled, pendingOfferDataEnabled));
 
         // send json message
         send(json.toString());
@@ -887,6 +932,7 @@ public class WebrtcClient extends CarrierExtension {
         JSONObject json = new JSONObject();
         // candidate type
         jsonPut(json, MessageKey.type.name(), MessageType.CANDIDATE.getValue());
+        putCallIdIfPresent(json);
         // candidate array
         JSONArray array = new JSONArray();
         array.put(toJsonCandidate(candidate));
@@ -908,6 +954,7 @@ public class WebrtcClient extends CarrierExtension {
         JSONObject json = new JSONObject();
         // candidate type
         jsonPut(json, MessageKey.type.name(), MessageType.CANDIDATE.getValue());
+        putCallIdIfPresent(json);
         // candidate array
         JSONArray array = new JSONArray();
         for (IceCandidate candidate : candidates) {
@@ -932,6 +979,7 @@ public class WebrtcClient extends CarrierExtension {
         JSONObject json = new JSONObject();
         // candidate type
         jsonPut(json, MessageKey.type.name(), MessageType.REMOVAL_CANDIDATES.getValue());
+        putCallIdIfPresent(json);
         // candidate array
         JSONArray array = new JSONArray();
         for (IceCandidate candidate : candidates) {
@@ -950,9 +998,32 @@ public class WebrtcClient extends CarrierExtension {
     private void sendBye(CallReason reason) {
         JSONObject json = new JSONObject();
         jsonPut(json, MessageKey.type.name(), MessageType.BYE.getValue());
+        putCallIdIfPresent(json);
         jsonPut(json, MessageKey.reason.name(), reason.getValue());
 
         send(json.toString());
+    }
+
+    // Attach the active callId to every outbound signalling message so peers (notably
+    // the iOS CallKit client) can match the message to the originating session.
+    private void putCallIdIfPresent(JSONObject json) {
+        if (!TextUtils.isEmpty(currentCallId)) {
+            jsonPut(json, MessageKey.callId.name(), currentCallId);
+        }
+    }
+
+    private JSONArray buildOptions(boolean audio, boolean video, boolean data) {
+        JSONArray options = new JSONArray();
+        if (audio) {
+            options.put("audio");
+        }
+        if (video) {
+            options.put("video");
+        }
+        if (data) {
+            options.put("data");
+        }
+        return options;
     }
 
     private enum ConnectionState {NEW, CONNECTED, CLOSED, ERROR}
@@ -960,7 +1031,7 @@ public class WebrtcClient extends CarrierExtension {
     /**
      * call message keys
      */
-    private enum MessageKey {type, sdp, candidates, options, reason}
+    private enum MessageKey {type, sdp, candidates, options, reason, callId}
 
     /**
      * call message types

@@ -35,7 +35,7 @@ afterEvaluate {
             jitpack(MavenPublication) {
                 groupId = project.findProperty('group') ?: 'com.github.0xli'
                 artifactId = project.findProperty('artifact') ?: 'Elastos.NET.WebRTC.Android.SDK'
-                version = project.findProperty('version') ?: '0.0.3-SNAPSHOT'
+                version = project.findProperty('version') ?: '0.0.4-SNAPSHOT'
                 def aar = file("${rootDir}/webrtc/build/outputs/aar/webrtc-release.aar")
                 artifact(aar) {
                     builtBy tasks.getByPath(':webrtc:assembleRelease')
@@ -80,4 +80,50 @@ afterEvaluate {
 
 tasks.register('clean', Delete) {
     delete rootProject.layout.buildDirectory
+}
+
+/**
+ * Copies release AAR + minimal POM into ../beaglechat/local-maven for {@code implementation 'org.elastos.carrier:webrtc:0.0.4'}.
+ */
+tasks.register('publishToBeagleLocal') {
+    group = 'publishing'
+    description = 'Install webrtc-release.aar as org.elastos.carrier:webrtc:0.0.4 into ../beaglechat/local-maven'
+    dependsOn ':webrtc:assembleRelease'
+    doLast {
+        def outDir = file("${rootDir}/../beaglechat/local-maven/org/elastos/carrier/webrtc/0.0.4")
+        outDir.mkdirs()
+        def aarIn = file("${rootDir}/webrtc/build/outputs/aar/webrtc-release.aar")
+        if (!aarIn.exists()) {
+            throw new GradleException("Missing ${aarIn} — run :webrtc:assembleRelease first")
+        }
+        copy {
+            from aarIn
+            into outDir
+            rename { 'webrtc-0.0.4.aar' }
+        }
+        def pom = new File(outDir, 'webrtc-0.0.4.pom')
+        pom.text = """<?xml version="1.0" encoding="UTF-8"?>
+<project xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd" xmlns="http://maven.apache.org/POM/4.0.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.elastos.carrier</groupId>
+  <artifactId>webrtc</artifactId>
+  <version>0.0.4</version>
+  <packaging>aar</packaging>
+  <dependencies>
+    <dependency><groupId>org.webrtc</groupId><artifactId>google-webrtc</artifactId><version>1.0.30039</version><scope>compile</scope></dependency>
+    <dependency><groupId>org.awaitility</groupId><artifactId>awaitility</artifactId><version>3.0.0</version><scope>compile</scope></dependency>
+    <dependency><groupId>com.google.guava</groupId><artifactId>guava</artifactId><version>28.1-android</version><scope>compile</scope></dependency>
+    <dependency><groupId>org.apache.commons</groupId><artifactId>commons-lang3</artifactId><version>3.9</version><scope>compile</scope></dependency>
+    <dependency><groupId>com.google.code.gson</groupId><artifactId>gson</artifactId><version>2.8.6</version><scope>compile</scope></dependency>
+    <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId><version>1.7.29</version><scope>compile</scope></dependency>
+    <dependency><groupId>com.github.tony19</groupId><artifactId>logback-android</artifactId><version>2.0.0</version><scope>compile</scope></dependency>
+    <dependency><groupId>commons-codec</groupId><artifactId>commons-codec</artifactId><version>1.10</version><scope>compile</scope></dependency>
+    <dependency><groupId>org.osgi</groupId><artifactId>org.osgi.framework</artifactId><version>1.9.0</version><scope>compile</scope></dependency>
+    <dependency><groupId>androidx.annotation</groupId><artifactId>annotation</artifactId><version>1.0.0</version><scope>compile</scope></dependency>
+  </dependencies>
+</project>
+"""
+        println "Published to ${pom.parentFile.absolutePath}"
+    }
 }
