@@ -58,6 +58,7 @@ import org.webrtc.VideoCapturer;
 import org.webrtc.VideoSink;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -117,6 +118,28 @@ public class WebrtcClient extends CarrierExtension {
     // echoed on every signalling message (offer/answer/candidate/bye) so peers — notably
     // the iOS CallKit-based client — can match each message to the correct call session.
     private String currentCallId;
+
+    /**
+     * Pace Carrier inviteFriend sends. A new invite to the same peer can replace an
+     * in-flight one — so answer/offer SDP must be alone on the wire before candidates.
+     */
+    private final Object sendLock = new Object();
+    private final ArrayDeque<String> sendQueue = new ArrayDeque<>();
+    private boolean sendPumpScheduled = false;
+    private long lastInviteSendAtMs = 0L;
+    /** Candidates must not send before this time (lets SDP invite finish delivering). */
+    private long candidatesAllowedAtMs = 0L;
+    private static final long MIN_INVITE_SEND_GAP_MS = 350L;
+    private static final long POST_SDP_BEFORE_CANDIDATES_MS = 1600L;
+    private static final long CANDIDATE_BATCH_DELAY_MS = 200L;
+    private final List<IceCandidate> pendingLocalCandidates = new ArrayList<>();
+    private final Runnable flushCandidatesRunnable = this::flushPendingLocalCandidates;
+    private final Runnable sendPumpRunnable = () -> {
+        synchronized (sendLock) {
+            sendPumpScheduled = false;
+            pumpSendQueueLocked();
+        }
+    };
 
     private WebrtcClient(Context context,
                          Carrier carrier,
@@ -246,6 +269,10 @@ public class WebrtcClient extends CarrierExtension {
      * Answer the call.
      */
     public void answerCall() {
+        if (remoteSdp == null) {
+            Log.e(TAG, "answerCall: no remote offer SDP (stale bye may have cleared it) — abort");
+            throw new IllegalStateException("answerCall: no remote offer SDP");
+        }
         this.initiator = false;
         this.setCallState(CallState.CONNECTING);
         this.peerConnectionParameters = copyPeerConnectionParameters(
@@ -262,7 +289,8 @@ public class WebrtcClient extends CarrierExtension {
      * Hangup/reject the call invitation.
      */
     public void rejectCall() throws WebrtcException {
-        sendBye(CallReason.REJECT);
+        clearSendQueue();
+        sendByeImmediate(CallReason.REJECT);
     }
 
     public CallState getCallState() {
@@ -280,11 +308,12 @@ public class WebrtcClient extends CarrierExtension {
 
     public void hangupCall() {
         this.setCallState(CallState.INIT);
-
-        sendBye(CallReason.NORMAL_HANGUP);
-
+        // Drop queued answer/candidates; bye must not sit behind them or be cleared.
+        clearSendQueue();
+        sendByeImmediate(CallReason.NORMAL_HANGUP);
         disconnectFromCallInternal();
-        handler.getLooper().quit();
+        // Keep the singleton HandlerThread alive. quit() used to break every
+        // subsequent makeCall/answerCall until process restart.
         Log.d(TAG, "Disconnect the call with" + remoteUserId);
     }
 
@@ -455,9 +484,16 @@ public class WebrtcClient extends CarrierExtension {
         }
         this.setCallState(CallState.INIT);
         connectionState = ConnectionState.CLOSED;
+        clearSendQueue();
         release();
+        // Fresh sinks for the next call — previous targets/EGL may be released.
+        localProxyVideoSink = new ProxyVideoSink();
+        remoteProxyVideoSink = new ProxyVideoSink();
+        remoteSinks = Arrays.asList(new VideoSink[]{remoteProxyVideoSink});
         peerConnectionParameters = defaultPeerConnectionParameters;
         currentCallId = null;
+        remoteSdp = null;
+        remoteIceList = null;
     }
 
     private void release() {
@@ -664,6 +700,13 @@ public class WebrtcClient extends CarrierExtension {
     }
 
     private void handleBye(JSONObject json) {
+        // Late bye from a previous call must not tear down a new ringing/connecting call —
+        // that cleared remoteSdp and made answerCall produce candidates with no answer SDP.
+        if (!isCurrentCallMessage(json)) {
+            String byeId = json != null ? json.optString(MessageKey.callId.name(), "") : "";
+            Log.w(TAG, "handleBye: ignore stale bye callId=" + byeId + " current=" + currentCallId);
+            return;
+        }
         CallReason callReason = null;
         if (json != null) {
             int reason = json.optInt(MessageKey.reason.name());
@@ -677,6 +720,18 @@ public class WebrtcClient extends CarrierExtension {
         this.setCallState(CallState.INIT);
         disconnectFromCallInternal();
         callHandler.onEndCall(callReason);
+    }
+
+    /** True if message has no callId, we have no current call, or callIds match. */
+    private boolean isCurrentCallMessage(JSONObject json) {
+        if (json == null) {
+            return true;
+        }
+        String msgCallId = json.optString(MessageKey.callId.name(), "");
+        if (TextUtils.isEmpty(msgCallId) || TextUtils.isEmpty(currentCallId)) {
+            return true;
+        }
+        return msgCallId.equalsIgnoreCase(currentCallId);
     }
 
     private void handleReject() {
@@ -705,12 +760,25 @@ public class WebrtcClient extends CarrierExtension {
                     handleOffer(json);
                     break;
                 case ANSWER:
+                    if (!isCurrentCallMessage(json)) {
+                        Log.w(TAG, "onCarrierMessage: ignore stale answer for callId="
+                                + json.optString(MessageKey.callId.name(), ""));
+                        break;
+                    }
                     handleAnswer(json);
                     break;
                 case CANDIDATE:
+                    if (!isCurrentCallMessage(json)) {
+                        Log.w(TAG, "onCarrierMessage: ignore stale candidates for callId="
+                                + json.optString(MessageKey.callId.name(), ""));
+                        break;
+                    }
                     handleCandidate(json);
                     break;
                 case REMOVAL_CANDIDATES:
+                    if (!isCurrentCallMessage(json)) {
+                        break;
+                    }
                     handleCandidateRemoval(json);
                     break;
                 case BYE:
@@ -862,13 +930,80 @@ public class WebrtcClient extends CarrierExtension {
     }
 
     private void send(String message) {
+        if (TextUtils.isEmpty(message) || TextUtils.isEmpty(remoteUserId)) {
+            Log.e(TAG, "send: drop empty message or remoteUserId");
+            return;
+        }
+        synchronized (sendLock) {
+            sendQueue.addLast(message);
+            Log.d(TAG, "send: queued (" + sendQueue.size() + " pending) type~"
+                    + message.substring(0, Math.min(40, message.length())));
+            pumpSendQueueLocked();
+        }
+    }
+
+    private void pumpSendQueueLocked() {
+        if (sendQueue.isEmpty()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        String peek = sendQueue.peekFirst();
+        boolean peekIsCandidate = peek != null && peek.contains("\"type\":\"candidate\"");
+        if (peekIsCandidate && now < candidatesAllowedAtMs) {
+            long waitCand = candidatesAllowedAtMs - now;
+            Log.d(TAG, "send: holding candidates for " + waitCand + "ms (SDP invite settle)");
+            if (!sendPumpScheduled) {
+                sendPumpScheduled = true;
+                handler.postDelayed(sendPumpRunnable, waitCand);
+            }
+            return;
+        }
+        long waitMs = MIN_INVITE_SEND_GAP_MS - (now - lastInviteSendAtMs);
+        if (waitMs > 0) {
+            if (!sendPumpScheduled) {
+                sendPumpScheduled = true;
+                handler.postDelayed(sendPumpRunnable, waitMs);
+            }
+            return;
+        }
+        final String message = sendQueue.pollFirst();
+        if (message == null) {
+            return;
+        }
+        boolean isSdp = message.contains("\"type\":\"offer\"") || message.contains("\"type\":\"answer\"");
         try {
-            // no wrap
             Log.d(TAG, "Calling control command : " + message);
             inviteFriend(remoteUserId, message, friendInviteResponseHandler);
+            lastInviteSendAtMs = System.currentTimeMillis();
+            if (isSdp) {
+                candidatesAllowedAtMs = lastInviteSendAtMs + POST_SDP_BEFORE_CANDIDATES_MS;
+                Log.d(TAG, "send: SDP invite sent — candidates blocked until +"
+                        + POST_SDP_BEFORE_CANDIDATES_MS + "ms");
+            }
         } catch (CarrierException e) {
             e.printStackTrace();
             Log.e(TAG, "send: carrier send message error: " + e.getMessage());
+        }
+        if (!sendQueue.isEmpty() && !sendPumpScheduled) {
+            long nextDelay = MIN_INVITE_SEND_GAP_MS;
+            String next = sendQueue.peekFirst();
+            if (next != null && next.contains("\"type\":\"candidate\"")
+                    && System.currentTimeMillis() < candidatesAllowedAtMs) {
+                nextDelay = Math.max(nextDelay, candidatesAllowedAtMs - System.currentTimeMillis());
+            }
+            sendPumpScheduled = true;
+            handler.postDelayed(sendPumpRunnable, nextDelay);
+        }
+    }
+
+    private void clearSendQueue() {
+        synchronized (sendLock) {
+            handler.removeCallbacks(sendPumpRunnable);
+            handler.removeCallbacks(flushCandidatesRunnable);
+            sendPumpScheduled = false;
+            sendQueue.clear();
+            pendingLocalCandidates.clear();
+            candidatesAllowedAtMs = 0L;
         }
     }
 
@@ -929,17 +1064,25 @@ public class WebrtcClient extends CarrierExtension {
             Log.e(TAG, "send IceCandidate error, candidate is null");
             return;
         }
-        JSONObject json = new JSONObject();
-        // candidate type
-        jsonPut(json, MessageKey.type.name(), MessageType.CANDIDATE.getValue());
-        putCallIdIfPresent(json);
-        // candidate array
-        JSONArray array = new JSONArray();
-        array.put(toJsonCandidate(candidate));
-        jsonPut(json, MessageKey.candidates.name(), array);
+        // Batch trickle candidates — one inviteFriend per candidate saturates Carrier.
+        synchronized (sendLock) {
+            pendingLocalCandidates.add(candidate);
+        }
+        handler.removeCallbacks(flushCandidatesRunnable);
+        handler.postDelayed(flushCandidatesRunnable, CANDIDATE_BATCH_DELAY_MS);
+    }
 
-        // send json message
-        send(json.toString());
+    private void flushPendingLocalCandidates() {
+        IceCandidate[] batch;
+        synchronized (sendLock) {
+            if (pendingLocalCandidates.isEmpty()) {
+                return;
+            }
+            batch = pendingLocalCandidates.toArray(new IceCandidate[0]);
+            pendingLocalCandidates.clear();
+        }
+        Log.d(TAG, "flushPendingLocalCandidates: " + batch.length);
+        sendCandidates(batch);
     }
 
     /**
@@ -996,12 +1139,25 @@ public class WebrtcClient extends CarrierExtension {
      * @param reason bye reason
      */
     private void sendBye(CallReason reason) {
+        sendByeImmediate(reason);
+    }
+
+    /** Best-effort bye that bypasses the invite queue (hangup must not wait on ICE). */
+    private void sendByeImmediate(CallReason reason) {
+        if (TextUtils.isEmpty(remoteUserId)) {
+            return;
+        }
         JSONObject json = new JSONObject();
         jsonPut(json, MessageKey.type.name(), MessageType.BYE.getValue());
         putCallIdIfPresent(json);
         jsonPut(json, MessageKey.reason.name(), reason.getValue());
-
-        send(json.toString());
+        String message = json.toString();
+        try {
+            Log.d(TAG, "Calling control command (bye immediate): " + message);
+            inviteFriend(remoteUserId, message, friendInviteResponseHandler);
+        } catch (CarrierException e) {
+            Log.e(TAG, "sendByeImmediate: " + e.getMessage());
+        }
     }
 
     // Attach the active callId to every outbound signalling message so peers (notably
@@ -1089,7 +1245,8 @@ public class WebrtcClient extends CarrierExtension {
 
         @Override
         public void onReceived(String from, int status, String reason, String data) {
-            Log.e(TAG, "carrier friend invite  onReceived from: " + from);
+            Log.d(TAG, "carrier friend invite onReceived from: " + from
+                    + " status=" + status + " reason=" + reason);
         }
     }
 

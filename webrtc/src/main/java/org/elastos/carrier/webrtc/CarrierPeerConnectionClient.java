@@ -818,27 +818,13 @@ public class CarrierPeerConnectionClient {
             factory.dispose();
             factory = null;
         }
-        if (webrtcClientClient != null) {
-            try {
-                webrtcClientClient.finalize();
-            } catch (Throwable throwable) {
-                Log.e(TAG, "Error to finalize webrtcClientClient");
-            }
-            webrtcClientClient = null;
-        }
-        Log.d(TAG, "Closing carrier webrtc client.");
-        if (rootEglBase != null) {
-            try {
-                rootEglBase.release();
-            } catch (Exception e) {
-                Log.e(TAG, "closeInternal: release eglBase error", e);
-            }
-            rootEglBase = null;
-        }
+        // Do NOT finalize WebrtcClient or release rootEglBase here — WebrtcClient owns
+        // both for the process lifetime. Releasing/shutdownInternalTracer on every hangup
+        // broke subsequent calls (0/N connect).
+        webrtcClientClient = null;
+        rootEglBase = null;
         Log.d(TAG, "Closing peer connection done.");
         events.onPeerConnectionClosed();
-        PeerConnectionFactory.stopInternalTracingCapture();
-        PeerConnectionFactory.shutdownInternalTracer();
     }
 
     public boolean isHDVideo() {
