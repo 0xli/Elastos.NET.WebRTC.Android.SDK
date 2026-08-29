@@ -1,0 +1,8 @@
+---
+description: Persist session decisions into git for Cursor/Claude Code/Codex
+alwaysApply: true
+---
+
+# Session memory → repo
+
+Update `docs/SESSION.md` + `docs/session-log/YYYY-MM-DD.md` after non-trivial work; read at start. No secrets. Skill: `session-handoff`.
